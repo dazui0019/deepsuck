@@ -11,7 +11,6 @@ const int ledR = LEDR;
 const int ledG = LEDG;
 const int ledB = LEDB;
 
-constexpr float kFilterRateHz = 100.0f;
 constexpr auto kFilterPeriod = 10ms;
 constexpr int kGyroBiasSamples = 300;
 constexpr int kWarmupSamples = 50;
@@ -70,9 +69,8 @@ static GyroBias calibrateGyroBias() {
 }
 
 void imuTask() {
-    float ax = 0.0, ay = 0.0, az = 0.0;
-    float gx = 0.0, gy = 0.0, gz = 0.0;
-    float roll = 0.0, pitch = 0.0, yaw = 0.0;
+    float ax = 0.0, ay = 0.0, az = 0.0; // 加速度
+    float gx = 0.0, gy = 0.0, gz = 0.0; // 角速度
 
     IMU.debug(Serial);
     if(!(IMU.begin(BOSCH_ACCELEROMETER_ONLY))){
@@ -83,28 +81,25 @@ void imuTask() {
     }
 
     GyroBias gyroBias = calibrateGyroBias();
-    filter.begin(kFilterRateHz);
 
     Serial.println("AHRS started in 6-axis mode.");
 
     while(true) {
-        if(IMU.accelerationAvailable() && IMU.gyroscopeAvailable()){
+        if(IMU.accelerationAvailable()){
             IMU.readAcceleration(ax, ay, az);
             IMU.readGyroscope(gx, gy, gz);
-            gx -= gyroBias.x;
-            gy -= gyroBias.y;
-            gz -= gyroBias.z;
-            filter.updateIMU(gx, gy, gz, ax, ay, az);
-        
-            roll = filter.getRoll();
-            pitch = filter.getPitch();
-            yaw = filter.getYaw();
 
-            Serial.print(roll);
+            Serial.print(ax, 4);
             Serial.print(",");
-            Serial.print(pitch);
+            Serial.print(ay, 4);
             Serial.print(",");
-            Serial.println(yaw);
+            Serial.print(az, 4);
+            Serial.print(",");
+            Serial.print(gx, 4);
+            Serial.print(",");
+            Serial.print(gy, 4);
+            Serial.print(",");
+            Serial.println(gz, 4);
         }
         ThisThread::sleep_for(kFilterPeriod);
     }
