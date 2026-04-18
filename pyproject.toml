@@ -1,0 +1,11 @@
+[project]
+name = "deepsuck"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.3.0",
+    "pyqtgraph>=0.13.7",
+    "pyside6>=6.9.0",
+]
