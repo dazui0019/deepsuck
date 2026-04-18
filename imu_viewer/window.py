@@ -1,268 +1,33 @@
 from __future__ import annotations
 
-import argparse
 import bisect
-import csv
-from pathlib import Path
-from typing import Callable
 
 import pyqtgraph as pg
-from pyqtgraph import functions as fn
 from PySide6 import QtCore, QtGui, QtWidgets
 
-
-TIME_COLUMN_CANDIDATES = (
-    "time",
-    "timestamp",
-    "t",
-    "ms",
-    "millis",
-    "millisecond",
-    "millisec",
-    "us",
-    "micros",
-    "microsecond",
-    "seconds",
-    "sec",
+from .constants import (
+    APP_BACKGROUND,
+    AXIS_COLOR,
+    AXIS_TEXT,
+    CURSOR_COLORS,
+    FORE_COLOR,
+    HOVER_LINE_COLOR,
+    PANEL_BACKGROUND,
+    PLOT_BACKGROUND,
+    PLOT_COLORS,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+    TITLE_COLOR,
 )
-
-PLOT_COLORS = (
-    "#5B84B1",
-    "#7AA6A1",
-    "#D9A066",
-    "#C97B63",
-    "#B07AA1",
-    "#7B8C99",
-    "#8AAE92",
-    "#8C7AA9",
-)
-
-CURSOR_COLORS = {
-    "A": "#C08A4D",
-    "B": "#B46A7A",
-}
-
-APP_BACKGROUND = "#F4F1EA"
-PANEL_BACKGROUND = "#ECE7DE"
-PLOT_BACKGROUND = "#FBF9F5"
-TEXT_PRIMARY = "#3E4B53"
-TEXT_SECONDARY = "#66757F"
-AXIS_COLOR = "#A2AEB6"
-AXIS_TEXT = "#516069"
-TITLE_COLOR = "#2F3D45"
-FORE_COLOR = "#65757E"
-HOVER_LINE_COLOR = "#96A6AF"
-DEFAULT_SAMPLE_PERIOD = 0.01
-
-
-def normalize_name(name: str) -> str:
-    return "".join(ch.lower() for ch in name if ch.isalnum())
-
-
-def guess_time_column(headers: list[str]) -> str | None:
-    normalized = {normalize_name(header): header for header in headers}
-    for candidate in TIME_COLUMN_CANDIDATES:
-        header = normalized.get(normalize_name(candidate))
-        if header:
-            return header
-    return None
-
-
-def read_csv(csv_path: Path) -> tuple[list[str], list[dict[str, float]]]:
-    with csv_path.open("r", newline="", encoding="utf-8-sig") as file:
-        reader = csv.DictReader(file)
-        if not reader.fieldnames:
-            raise ValueError("CSV does not contain a header row.")
-
-        headers = [header.strip() for header in reader.fieldnames]
-        rows: list[dict[str, float]] = []
-
-        for raw_row in reader:
-            parsed: dict[str, float] = {}
-            for header in headers:
-                raw_value = (raw_row.get(header) or "").strip()
-                if raw_value == "":
-                    continue
-                try:
-                    parsed[header] = float(raw_value)
-                except ValueError:
-                    continue
-            if parsed:
-                rows.append(parsed)
-
-    if not rows:
-        raise ValueError("CSV does not contain any numeric rows.")
-
-    return headers, rows
-
-
-def resolve_y_columns(headers: list[str], rows: list[dict[str, float]], requested: list[str] | None) -> list[str]:
-    numeric_headers = [header for header in headers if any(header in row for row in rows)]
-
-    if requested:
-        missing = [column for column in requested if column not in numeric_headers]
-        if missing:
-            available = ", ".join(numeric_headers)
-            raise ValueError(f"Unknown column(s): {', '.join(missing)}. Available numeric columns: {available}")
-        return requested
-
-    time_column = guess_time_column(numeric_headers)
-    return [header for header in numeric_headers if header != time_column]
-
-
-def build_x_axis(
-    rows: list[dict[str, float]],
-    time_column: str | None,
-    sample_rate: float | None,
-    sample_period: float | None,
-) -> tuple[list[float], str, bool]:
-    if time_column:
-        x_values = [row.get(time_column) for row in rows]
-        valid_x = [value for value in x_values if value is not None]
-        if len(valid_x) == len(rows):
-            axis_label = time_column
-            normalized = normalize_name(time_column)
-            if normalized in {"ms", "millis", "millisecond", "millisec"}:
-                axis_label = f"{time_column} (ms)"
-            elif normalized in {"us", "micros", "microsecond"}:
-                axis_label = f"{time_column} (us)"
-            elif normalized in {"time", "timestamp", "t", "seconds", "sec"}:
-                axis_label = f"{time_column} (s)"
-            return valid_x, axis_label, True
-
-    effective_period = sample_period
-    if effective_period is None:
-        if sample_rate and sample_rate > 0:
-            effective_period = 1.0 / sample_rate
-        else:
-            effective_period = DEFAULT_SAMPLE_PERIOD
-
-    if effective_period <= 0:
-        raise ValueError("Sample period must be positive.")
-
-    return [index * effective_period for index in range(len(rows))], "Time (s)", False
-
-
-def build_series(rows: list[dict[str, float]], x_values: list[float], column: str) -> tuple[list[float], list[float]]:
-    xs: list[float] = []
-    ys: list[float] = []
-    for index, row in enumerate(rows):
-        value = row.get(column)
-        if value is None:
-            continue
-        xs.append(x_values[index])
-        ys.append(value)
-    return xs, ys
-
-
-def x_axis_scale_to_seconds(x_label: str) -> float | None:
-    if "(us)" in x_label:
-        return 1e-6
-    if "(ms)" in x_label:
-        return 1e-3
-    if "(s)" in x_label:
-        return 1.0
-    return None
-
-
-def estimate_sample_period_seconds(x_values: list[float], x_label: str) -> float | None:
-    if len(x_values) < 2:
-        return None
-
-    scale_to_seconds = x_axis_scale_to_seconds(x_label)
-    if scale_to_seconds is None:
-        return None
-
-    deltas = [x_values[index] - x_values[index - 1] for index in range(1, len(x_values))]
-    positive_deltas = [delta * scale_to_seconds for delta in deltas if delta > 0]
-    if not positive_deltas:
-        return None
-    return sum(positive_deltas) / len(positive_deltas)
-
-
-def low_pass_series(xs: list[float], ys: list[float], x_label: str, cutoff_hz: float) -> tuple[list[float], list[float]]:
-    if cutoff_hz <= 0:
-        raise ValueError("Low-pass cutoff must be positive.")
-    if len(xs) != len(ys):
-        raise ValueError("X and Y series lengths do not match.")
-    if len(ys) < 2:
-        return xs, ys
-
-    scale_to_seconds = x_axis_scale_to_seconds(x_label)
-    if scale_to_seconds is None:
-        raise ValueError("Cannot apply low-pass filter because the X axis unit is unknown.")
-
-    rc = 1.0 / (2.0 * 3.141592653589793 * cutoff_hz)
-    filtered = [ys[0]]
-
-    for index in range(1, len(ys)):
-        dt = (xs[index] - xs[index - 1]) * scale_to_seconds
-        if dt <= 0:
-            filtered.append(filtered[-1])
-            continue
-        alpha = dt / (rc + dt)
-        filtered.append(filtered[-1] + alpha * (ys[index] - filtered[-1]))
-
-    return xs, filtered
-
-
-def high_pass_series(xs: list[float], ys: list[float], x_label: str, cutoff_hz: float) -> tuple[list[float], list[float]]:
-    if cutoff_hz <= 0:
-        raise ValueError("High-pass cutoff must be positive.")
-    if len(xs) != len(ys):
-        raise ValueError("X and Y series lengths do not match.")
-    if len(ys) < 2:
-        return xs, ys
-
-    scale_to_seconds = x_axis_scale_to_seconds(x_label)
-    if scale_to_seconds is None:
-        raise ValueError("Cannot apply high-pass filter because the X axis unit is unknown.")
-
-    rc = 1.0 / (2.0 * 3.141592653589793 * cutoff_hz)
-    filtered = [0.0]
-
-    for index in range(1, len(ys)):
-        dt = (xs[index] - xs[index - 1]) * scale_to_seconds
-        if dt <= 0:
-            filtered.append(filtered[-1])
-            continue
-        alpha = rc / (rc + dt)
-        filtered.append(alpha * (filtered[-1] + ys[index] - ys[index - 1]))
-
-    return xs, filtered
-
-
-def apply_filter_chain(
-    xs: list[float],
-    ys: list[float],
-    x_label: str,
-    highpass_cutoff_hz: float | None,
-    lowpass_cutoff_hz: float | None,
-) -> tuple[list[float], list[float]]:
-    current_xs = xs
-    current_ys = ys
-
-    if highpass_cutoff_hz is not None:
-        current_xs, current_ys = high_pass_series(current_xs, current_ys, x_label, highpass_cutoff_hz)
-    if lowpass_cutoff_hz is not None:
-        current_xs, current_ys = low_pass_series(current_xs, current_ys, x_label, lowpass_cutoff_hz)
-
-    return current_xs, current_ys
-
-
-def make_info_label(text: str) -> QtWidgets.QLabel:
-    label = QtWidgets.QLabel(text)
-    label.setWordWrap(False)
-    label.setStyleSheet(
-        f"QLabel {{ color: {TEXT_PRIMARY}; background: {PANEL_BACKGROUND}; padding: 4px 8px; border: 1px solid #D9D2C7; font-family: Consolas, monospace; font-size: 12px; font-weight: 600; }}"
-    )
-    return label
+from .data import build_series, build_x_axis, estimate_sample_period_seconds
+from .filters import apply_filter_chain
+from .widgets import ScopePlotWidget, make_info_label
 
 
 class ScopeWindow(QtWidgets.QMainWindow):
     def __init__(
         self,
-        csv_path: Path,
+        csv_path,
         rows: list[dict[str, float]],
         y_columns: list[str],
         time_column: str | None,
@@ -288,7 +53,7 @@ class ScopeWindow(QtWidgets.QMainWindow):
         self.sample_period_s = (
             initial_sample_period_s
             if initial_sample_period_s is not None
-            else (1.0 / initial_sample_rate_hz if initial_sample_rate_hz and initial_sample_rate_hz > 0 else DEFAULT_SAMPLE_PERIOD)
+            else (1.0 / initial_sample_rate_hz if initial_sample_rate_hz and initial_sample_rate_hz > 0 else 0.01)
         )
         self.sample_rate_hz = 1.0 / self.sample_period_s
         if self.using_csv_time_axis:
@@ -665,7 +430,6 @@ class ScopeWindow(QtWidgets.QMainWindow):
         plot.setMouseEnabled(x=True, y=True)
         plot.setDownsampling(auto=True, mode="peak")
         plot.setClipToView(True)
-        plot.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         plot.getAxis("left").setStyle(tickTextOffset=10)
         plot.getAxis("bottom").setStyle(tickTextOffset=10)
         axis_font = QtGui.QFont("Consolas", 10)
@@ -846,147 +610,3 @@ class ScopeWindow(QtWidgets.QMainWindow):
             self._reset_all_views()
             return
         super().keyPressEvent(event)
-
-
-class ScopeViewBox(pg.ViewBox):
-    def __init__(self, reset_callback: Callable[[], None] | None = None, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._reset_callback = reset_callback
-        self.setMouseMode(pg.ViewBox.RectMode)
-
-    def mouseClickEvent(self, ev) -> None:
-        if ev.button() == QtCore.Qt.MouseButton.MiddleButton:
-            ev.accept()
-            if self._reset_callback is not None:
-                self._reset_callback()
-            else:
-                self.enableAutoRange()
-                self.autoRange()
-            return
-        super().mouseClickEvent(ev)
-
-    def mouseDragEvent(self, ev, axis=None) -> None:
-        if ev.button() == QtCore.Qt.MouseButton.RightButton:
-            ev.accept()
-
-            pos = ev.pos()
-            last_pos = ev.lastPos()
-            dif = (pos - last_pos) * -1
-
-            mouse_enabled = [1.0 if enabled else 0.0 for enabled in self.state["mouseEnabled"]]
-            if axis is not None:
-                mouse_enabled[1 - axis] = 0.0
-
-            tr = self.childGroup.transform()
-            tr = fn.invertQTransform(tr)
-            tr = tr.map(dif) - tr.map(pg.Point(0, 0))
-
-            x = tr.x() if mouse_enabled[0] else None
-            y = tr.y() if mouse_enabled[1] else None
-
-            self._resetTarget()
-            if x is not None or y is not None:
-                self.translateBy(x=x, y=y)
-            self.sigRangeChangedManually.emit(self.state["mouseEnabled"])
-            return
-
-        super().mouseDragEvent(ev, axis=axis)
-
-
-class ScopePlotWidget(pg.PlotWidget):
-    def __init__(self, reset_callback: Callable[[], None] | None = None, *args, **kwargs) -> None:
-        kwargs.setdefault("viewBox", ScopeViewBox(reset_callback=reset_callback))
-        super().__init__(*args, **kwargs)
-
-    def autoRangeEnabled(self) -> tuple[bool, bool]:
-        return self.plotItem.vb.autoRangeEnabled()
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Display IMU CSV data in an interactive oscilloscope-style PyQtGraph window.",
-    )
-    parser.add_argument("csv_path", type=Path, help="Path to the CSV file.")
-    parser.add_argument(
-        "--y",
-        nargs="+",
-        help="Columns to plot. If omitted, all numeric columns except the detected time column are used.",
-    )
-    parser.add_argument(
-        "--time-column",
-        help="Name of the column used as the X axis. If omitted, the script auto-detects time-like columns.",
-    )
-    parser.add_argument(
-        "--sample-rate",
-        type=float,
-        help="Use sample rate in Hz to build a time axis when the CSV has no time column.",
-    )
-    parser.add_argument(
-        "--sample-period",
-        type=float,
-        help=f"Use sample period in seconds when the CSV has no time column. Default is {DEFAULT_SAMPLE_PERIOD} s.",
-    )
-    parser.add_argument(
-        "--split",
-        action="store_true",
-        help="Draw each selected channel in its own stacked plot instead of a single shared plot.",
-    )
-    parser.add_argument(
-        "--highpass-cutoff",
-        type=float,
-        help="Initialize the GUI high-pass filter control with this cutoff frequency in Hz.",
-    )
-    parser.add_argument(
-        "--lowpass-cutoff",
-        type=float,
-        help="Initialize the GUI low-pass filter control with this cutoff frequency in Hz.",
-    )
-    parser.add_argument(
-        "--title",
-        help="Optional window title.",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    if args.sample_rate is not None and args.sample_period is not None:
-        raise ValueError("Use either --sample-rate or --sample-period, not both.")
-    if args.highpass_cutoff is not None and args.highpass_cutoff <= 0:
-        raise ValueError("--highpass-cutoff must be positive.")
-    if args.lowpass_cutoff is not None and args.lowpass_cutoff <= 0:
-        raise ValueError("--lowpass-cutoff must be positive.")
-
-    headers, rows = read_csv(args.csv_path)
-    y_columns = resolve_y_columns(headers, rows, args.y)
-    time_column = args.time_column or guess_time_column(headers)
-    x_values, x_label, using_csv_time_axis = build_x_axis(rows, time_column, args.sample_rate, args.sample_period)
-
-    if not y_columns:
-        raise ValueError("No numeric IMU columns were found to plot.")
-
-    series_map = {column: build_series(rows, x_values, column) for column in y_columns}
-
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    window = ScopeWindow(
-        csv_path=args.csv_path,
-        rows=rows,
-        y_columns=y_columns,
-        time_column=time_column,
-        x_values=x_values,
-        x_label=x_label,
-        series_map=series_map,
-        split=args.split,
-        title=args.title,
-        using_csv_time_axis=using_csv_time_axis,
-        initial_sample_rate_hz=args.sample_rate,
-        initial_sample_period_s=args.sample_period,
-        initial_highpass_cutoff_hz=args.highpass_cutoff,
-        initial_lowpass_cutoff_hz=args.lowpass_cutoff,
-    )
-    window.show()
-    app.exec()
-
-
-if __name__ == "__main__":
-    main()
