@@ -12,8 +12,11 @@ const int ledG = LEDG;
 const int ledB = LEDB;
 
 constexpr auto kFilterPeriod = 10ms;
+constexpr float kFilterPeriodSeconds = 0.01f;
 constexpr int kGyroBiasSamples = 300;
 constexpr int kWarmupSamples = 50;
+constexpr float kAccelLowPassCutoffHz = 5.0f;
+constexpr float kGyroLowPassCutoffHz = 8.0f;
 
 // thread
 Thread blinkThread(osPriorityHigh, OS_STACK_SIZE, nullptr, "IMU_Task");
@@ -25,6 +28,34 @@ struct GyroBias {
     float x;
     float y;
     float z;
+};
+
+struct LowPassFilter {
+    float alpha;
+    float state;
+    bool initialized;
+
+    explicit LowPassFilter(float cutoffHz)
+        : alpha(computeAlpha(cutoffHz)), state(0.0f), initialized(false) {}
+
+    static float computeAlpha(float cutoffHz) {
+        if (cutoffHz <= 0.0f) {
+            return 1.0f;
+        }
+        const float rc = 1.0f / (2.0f * PI * cutoffHz);
+        return kFilterPeriodSeconds / (rc + kFilterPeriodSeconds);
+    }
+
+    float apply(float input) {
+        if (!initialized) {
+            state = input;
+            initialized = true;
+            return state;
+        }
+
+        state += alpha * (input - state);
+        return state;
+    }
 };
 
 static GyroBias calibrateGyroBias() {
@@ -71,6 +102,12 @@ static GyroBias calibrateGyroBias() {
 void imuTask() {
     float ax = 0.0, ay = 0.0, az = 0.0; // 加速度
     float gx = 0.0, gy = 0.0, gz = 0.0; // 角速度
+    LowPassFilter accelFilterX(kAccelLowPassCutoffHz);
+    LowPassFilter accelFilterY(kAccelLowPassCutoffHz);
+    LowPassFilter accelFilterZ(kAccelLowPassCutoffHz);
+    LowPassFilter gyroFilterX(kGyroLowPassCutoffHz);
+    LowPassFilter gyroFilterY(kGyroLowPassCutoffHz);
+    LowPassFilter gyroFilterZ(kGyroLowPassCutoffHz);
 
     IMU.debug(Serial);
     if(!(IMU.begin(BOSCH_ACCELEROMETER_ONLY))){
@@ -88,6 +125,17 @@ void imuTask() {
         if(IMU.accelerationAvailable()){
             IMU.readAcceleration(ax, ay, az);
             IMU.readGyroscope(gx, gy, gz);
+
+            gx -= gyroBias.x;
+            gy -= gyroBias.y;
+            gz -= gyroBias.z;
+
+            ax = accelFilterX.apply(ax);
+            ay = accelFilterY.apply(ay);
+            az = accelFilterZ.apply(az);
+            gx = gyroFilterX.apply(gx);
+            gy = gyroFilterY.apply(gy);
+            gz = gyroFilterZ.apply(gz);
 
             Serial.print(ax, 4);
             Serial.print(",");
