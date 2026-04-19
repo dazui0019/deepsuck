@@ -1,7 +1,7 @@
 #include <Arduino.h>
+#include <Wire.h>
 #include <rtos.h>
-#include "Arduino_BMI270_BMM150.h"
-#include "MadgwickAHRS.h"
+#include "SparkFun_BMI270_Arduino_Library.h"
 
 using namespace rtos;
 using namespace std::chrono_literals;
@@ -11,145 +11,58 @@ const int ledR = LEDR;
 const int ledG = LEDG;
 const int ledB = LEDB;
 
-constexpr auto kFilterPeriod = 10ms;
-constexpr float kFilterPeriodSeconds = 0.01f;
-constexpr int kGyroBiasSamples = 300;
-constexpr int kWarmupSamples = 50;
-constexpr float kAccelLowPassCutoffHz = 5.0f;
-constexpr float kGyroLowPassCutoffHz = 8.0f;
+uint8_t i2cAddress = BMI2_I2C_PRIM_ADDR; // 0x68
+BMI270 imu;
 
 // thread
 Thread blinkThread(osPriorityHigh, OS_STACK_SIZE, nullptr, "IMU_Task");
 
-// 
-Madgwick filter;
-
-struct GyroBias {
-    float x;
-    float y;
-    float z;
-};
-
-struct LowPassFilter {
-    float alpha;
-    float state;
-    bool initialized;
-
-    explicit LowPassFilter(float cutoffHz)
-        : alpha(computeAlpha(cutoffHz)), state(0.0f), initialized(false) {}
-
-    static float computeAlpha(float cutoffHz) {
-        if (cutoffHz <= 0.0f) {
-            return 1.0f;
-        }
-        const float rc = 1.0f / (2.0f * PI * cutoffHz);
-        return kFilterPeriodSeconds / (rc + kFilterPeriodSeconds);
-    }
-
-    float apply(float input) {
-        if (!initialized) {
-            state = input;
-            initialized = true;
-            return state;
-        }
-
-        state += alpha * (input - state);
-        return state;
-    }
-};
-
-static GyroBias calibrateGyroBias() {
-    float gx = 0.0f;
-    float gy = 0.0f;
-    float gz = 0.0f;
-    GyroBias bias{0.0f, 0.0f, 0.0f};
-
-    Serial.println("Keep IMU still, calibrating gyro bias...");
-
-    for (int i = 0; i < kWarmupSamples; ++i) {
-        if (IMU.gyroscopeAvailable()) {
-            IMU.readGyroscope(gx, gy, gz);
-        }
-        ThisThread::sleep_for(kFilterPeriod);
-    }
-
-    int samples = 0;
-    while (samples < kGyroBiasSamples) {
-        if (IMU.gyroscopeAvailable()) {
-            IMU.readGyroscope(gx, gy, gz);
-            bias.x += gx;
-            bias.y += gy;
-            bias.z += gz;
-            ++samples;
-        }
-        ThisThread::sleep_for(kFilterPeriod);
-    }
-
-    bias.x /= kGyroBiasSamples;
-    bias.y /= kGyroBiasSamples;
-    bias.z /= kGyroBiasSamples;
-
-    Serial.print("Gyro bias(dps): ");
-    Serial.print(bias.x, 4);
-    Serial.print(", ");
-    Serial.print(bias.y, 4);
-    Serial.print(", ");
-    Serial.println(bias.z, 4);
-
-    return bias;
-}
-
 void imuTask() {
-    float ax = 0.0, ay = 0.0, az = 0.0; // 加速度
-    float gx = 0.0, gy = 0.0, gz = 0.0; // 角速度
-    LowPassFilter accelFilterX(kAccelLowPassCutoffHz);
-    LowPassFilter accelFilterY(kAccelLowPassCutoffHz);
-    LowPassFilter accelFilterZ(kAccelLowPassCutoffHz);
-    LowPassFilter gyroFilterX(kGyroLowPassCutoffHz);
-    LowPassFilter gyroFilterY(kGyroLowPassCutoffHz);
-    LowPassFilter gyroFilterZ(kGyroLowPassCutoffHz);
+    Wire1.begin();
 
-    IMU.debug(Serial);
-    if(!(IMU.begin(BOSCH_ACCELEROMETER_ONLY))){
-        while(1){
-            Serial.println("Failed to initialize IMU!");
-            ThisThread::sleep_for(100ms);
-        }
+    while(imu.beginI2C(i2cAddress, Wire1) != BMI2_OK){
+        // Not connected, inform user
+        Serial.println("Error: BMI270 not connected, check wiring and I2C address!");
+
+        // Wait a bit to see if connection is established
+        delay(1000);
     }
 
-    GyroBias gyroBias = calibrateGyroBias();
+    Serial.println("BMI270 connected!");
+    
+    while(true){
+        // Get measurements from the sensor. This must be called before accessing
+        // the sensor data, otherwise it will never update
+        imu.getSensorData();
 
-    Serial.println("AHRS started in 6-axis mode.");
+        // Print acceleration data
+        Serial.print("Acceleration in g's");
+        Serial.print("\t");
+        Serial.print("X: ");
+        Serial.print(imu.data.accelX, 3);
+        Serial.print("\t");
+        Serial.print("Y: ");
+        Serial.print(imu.data.accelY, 3);
+        Serial.print("\t");
+        Serial.print("Z: ");
+        Serial.print(imu.data.accelZ, 3);
 
-    while(true) {
-        if(IMU.accelerationAvailable()){
-            IMU.readAcceleration(ax, ay, az);
-            IMU.readGyroscope(gx, gy, gz);
+        Serial.print("\t");
 
-            gx -= gyroBias.x;
-            gy -= gyroBias.y;
-            gz -= gyroBias.z;
+        // Print rotation data
+        Serial.print("Rotation in deg/sec");
+        Serial.print("\t");
+        Serial.print("X: ");
+        Serial.print(imu.data.gyroX, 3);
+        Serial.print("\t");
+        Serial.print("Y: ");
+        Serial.print(imu.data.gyroY, 3);
+        Serial.print("\t");
+        Serial.print("Z: ");
+        Serial.println(imu.data.gyroZ, 3);
 
-            ax = accelFilterX.apply(ax);
-            ay = accelFilterY.apply(ay);
-            az = accelFilterZ.apply(az);
-            gx = gyroFilterX.apply(gx);
-            gy = gyroFilterY.apply(gy);
-            gz = gyroFilterZ.apply(gz);
-
-            Serial.print(ax, 4);
-            Serial.print(",");
-            Serial.print(ay, 4);
-            Serial.print(",");
-            Serial.print(az, 4);
-            Serial.print(",");
-            Serial.print(gx, 4);
-            Serial.print(",");
-            Serial.print(gy, 4);
-            Serial.print(",");
-            Serial.println(gz, 4);
-        }
-        ThisThread::sleep_for(kFilterPeriod);
+        // Print 50x per second
+        delay(20);
     }
 }
 
